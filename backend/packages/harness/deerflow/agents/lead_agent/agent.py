@@ -365,7 +365,15 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
-    available_skills = _available_skill_names(agent_config, is_bootstrap)
+    context_skills = cfg.get("skills")
+    if context_skills is not None and isinstance(context_skills, list):
+        available_skills = set(context_skills) if context_skills else set()
+    elif is_bootstrap:
+        available_skills = {"bootstrap"}
+    elif agent_config and agent_config.skills is not None:
+        available_skills = set(agent_config.skills)
+    else:
+        available_skills = None  # None = all enabled skills
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -439,7 +447,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
-            available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
+            available_skills=available_skills,
             app_config=resolved_app_config,
         ),
         state_schema=ThreadState,
