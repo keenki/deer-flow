@@ -46,6 +46,8 @@ from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
 
+_BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
+
 
 def _normalize_selected_skill_names(value: object) -> set[str] | None:
     """Normalize optional per-run skill selection from configurable context."""
@@ -278,6 +280,7 @@ def _build_middlewares(
     agent_name: str | None = None,
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
+    available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
 ):
     """Build middleware chain based on runtime configuration.
@@ -298,6 +301,13 @@ def _build_middlewares(
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
     middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+
+    # Deterministically load a full SKILL.md when the user starts the turn with
+    # /skill-name. This keeps the base system prompt metadata-only while giving
+    # explicit user activation priority over model-side relevance guessing.
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+    middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config))
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
@@ -355,7 +365,7 @@ def _build_middlewares(
 
 def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     if is_bootstrap:
-        return {"bootstrap"}
+        return set(_BOOTSTRAP_SKILL_NAMES)
     if agent_config and agent_config.skills is not None:
         return set(agent_config.skills)
     return None
@@ -463,15 +473,22 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
+        # Keep the bootstrap skill set intentionally narrow so agent creation
+        # remains deterministic before the custom agent's own config exists.
         tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy),
-            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
+            middleware=_build_middlewares(
+                config,
+                model_name=model_name,
+                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
+                app_config=resolved_app_config,
+            ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
-                available_skills=set(["bootstrap"]),
+                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
             ),
             state_schema=ThreadState,
@@ -485,7 +502,13 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
+        middleware=_build_middlewares(
+            config,
+            model_name=model_name,
+            agent_name=agent_name,
+            available_skills=available_skills,
+            app_config=resolved_app_config,
+        ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,

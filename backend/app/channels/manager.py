@@ -19,7 +19,11 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 from app.gateway.internal_auth import create_internal_auth_headers
+from deerflow.config.agents_config import load_agent_config
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
+from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.storage.skill_storage import SkillStorage
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +118,10 @@ register_inbound_file_reader("wechat", _read_wechat_inbound_file)
 
 class InvalidChannelSessionConfigError(ValueError):
     """Raised when IM channel session overrides contain invalid agent config."""
+
+
+class SlashSkillCommandResolutionError(RuntimeError):
+    """Raised when IM slash-skill command resolution cannot complete safely."""
 
 
 def _is_thread_busy_error(exc: BaseException | None) -> bool:
@@ -338,6 +346,29 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
+def _is_enabled_slash_skill_command(
+    text: str,
+    available_skills: set[str] | None = None,
+    storage: SkillStorage | Callable[[], SkillStorage] | None = None,
+) -> bool:
+    if parse_slash_skill_reference(text) is None:
+        return False
+    try:
+        resolved_storage = storage() if callable(storage) else storage or get_or_new_skill_storage()
+        return (
+            resolve_slash_skill(
+                text,
+                resolved_storage.load_skills(enabled_only=False),
+                available_skills=available_skills,
+                container_base_path=resolved_storage.get_container_root(),
+            )
+            is not None
+        )
+    except Exception as exc:
+        logger.exception("[Manager] failed to resolve slash skill command")
+        raise SlashSkillCommandResolutionError("Failed to resolve slash skill command. Please check the skill configuration.") from exc
+
+
 def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedAttachment]:
     """Resolve virtual artifact paths to host filesystem paths with metadata.
 
@@ -552,6 +583,7 @@ class ChannelManager:
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
         self._client = None  # lazy init — langgraph_sdk async client
+        self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
@@ -616,6 +648,21 @@ class ChannelManager:
 
         return assistant_id, run_config, run_context
 
+    def _resolve_available_skill_names(self, msg: InboundMessage) -> set[str] | None:
+        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
+        _, _, run_context = self._resolve_run_params(msg, thread_id)
+        if run_context.get("is_bootstrap"):
+            return {"bootstrap"}
+
+        agent_name = run_context.get("agent_name")
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            return None
+
+        agent_config = load_agent_config(_normalize_custom_agent_name(agent_name))
+        if agent_config and agent_config.skills is not None:
+            return set(agent_config.skills)
+        return None
+
     # -- LangGraph SDK client (lazy) ----------------------------------------
 
     def _get_client(self):
@@ -632,6 +679,11 @@ class ChannelManager:
                 },
             )
         return self._client
+
+    def _get_skill_storage(self) -> SkillStorage:
+        if self._skill_storage is None:
+            self._skill_storage = get_or_new_skill_storage()
+        return self._skill_storage
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -697,6 +749,14 @@ class ChannelManager:
             except InvalidChannelSessionConfigError as exc:
                 logger.warning(
                     "Invalid channel session config for %s (chat=%s): %s",
+                    msg.channel_name,
+                    msg.chat_id,
+                    exc,
+                )
+                await self._send_error(msg, str(exc))
+            except SlashSkillCommandResolutionError as exc:
+                logger.warning(
+                    "Slash skill command resolution failed for %s (chat=%s): %s",
                     msg.channel_name,
                     msg.chat_id,
                     exc,
@@ -969,8 +1029,21 @@ class ChannelManager:
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
                 "/memory — Show memory status\n"
+                "/<skill-name> <task> — Activate an enabled skill for one turn\n"
                 "/help — Show this help"
             )
+        elif await asyncio.to_thread(
+            lambda: _is_enabled_slash_skill_command(
+                text,
+                self._resolve_available_skill_names(msg),
+                self._get_skill_storage,
+            )
+        ):
+            from dataclasses import replace as _dc_replace
+
+            chat_msg = _dc_replace(msg, msg_type=InboundMessageType.CHAT)
+            await self._handle_chat(chat_msg)
+            return
         else:
             available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
             reply = f"Unknown command: /{command}. Available commands: {available}"
