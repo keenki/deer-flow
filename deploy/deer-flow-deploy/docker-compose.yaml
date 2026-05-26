@@ -1,0 +1,90 @@
+# DeerFlow Production Deployment (packaged images)
+# Usage: ./deploy.sh start
+#
+# Services:
+#   - nginx:       Reverse proxy (port ${PORT:-2026})
+#   - frontend:    Next.js production server
+#   - gateway:     FastAPI Gateway API + agent runtime (with AIO sandbox via DooD)
+#
+# Note: provisioner (K8s mode) is NOT included. AIO sandbox uses Docker-in-Docker.
+# LangGraph is embedded in the gateway container, not a separate service.
+#
+# Access: http://localhost:${PORT:-2026}
+
+services:
+  # ── Reverse Proxy ──────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: deer-flow-nginx
+    ports:
+      - "${PORT:-2026}:2026"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf.template:ro
+    command: >
+      sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
+      && nginx -g 'daemon off;'"
+    depends_on:
+      - frontend
+      - gateway
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
+  # ── Frontend: Next.js Production ───────────────────────────────────────────
+  frontend:
+    image: deer-flow/frontend:latest
+    container_name: deer-flow-frontend
+    environment:
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+      - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
+  # ── Gateway API (with AIO sandbox via DooD) ────────────────────────────────
+  gateway:
+    image: deer-flow/gateway:latest
+    container_name: deer-flow-gateway
+    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
+    volumes:
+      - ./config.yaml:/app/backend/config.yaml:ro
+      - ./extensions_config.json:/app/backend/extensions_config.json:ro
+      - ./skills:/app/skills:ro
+      - ./data:/app/backend/.deer-flow
+      # DooD: AioSandboxProvider spawns sandbox containers via host Docker daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
+      - type: bind
+        source: ${HOME:?HOME must be set}/.claude
+        target: /root/.claude
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME:?HOME must be set}/.codex
+        target: /root/.codex
+        read_only: true
+        bind:
+          create_host_path: true
+    working_dir: /app
+    environment:
+      - CI=true
+      - DEER_FLOW_PROJECT_ROOT=/app
+      - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
+      - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
+      - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
+      # DooD path/network translation for AIO sandbox
+      - DEER_FLOW_HOST_BASE_DIR=./data
+      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_HOST_SKILLS_PATH:-/opt/deer-flow/skills}
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
+networks:
+  deer-flow:
+    driver: bridge

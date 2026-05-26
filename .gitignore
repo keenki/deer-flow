@@ -49,6 +49,15 @@ debug.log
 .pnpm-store
 sandbox_image_cache.tar
 
+# Deployment archives
+**/deploy/**/*.tar.gz
+**/deploy/**/*.zip
+**/deploy/**/*.tar
+# Deployment runtime files
+deploy/deer-flow-deploy/config.yaml
+deploy/deer-flow-deploy/extensions_config.json
+deploy/deer-flow-deploy/data/
+
 # ignore the legacy `web` folder
 web/
 
