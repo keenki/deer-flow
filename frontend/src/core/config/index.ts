@@ -13,9 +13,13 @@ export function getBackendBaseURL() {
     return new URL(env.NEXT_PUBLIC_BACKEND_BASE_URL, getBaseOrigin())
       .toString()
       .replace(/\/+$/, "");
-  } else {
-    return "";
   }
+  // When embedded with a basePath (e.g. /expert), return it so API calls
+  // are routed through the embedding app's proxy chain.
+  if (env.NEXT_PUBLIC_BASE_PATH) {
+    return env.NEXT_PUBLIC_BASE_PATH;
+  }
+  return "";
 }
 
 export function getLangGraphBaseURL(isMock?: boolean) {
@@ -35,10 +39,11 @@ export function getLangGraphBaseURL(isMock?: boolean) {
     return "http://localhost:3000/mock/api";
   } else {
     // LangGraph SDK requires a full URL, construct it from current origin
+    const basePath = env.NEXT_PUBLIC_BASE_PATH ?? "";
     if (typeof window !== "undefined") {
-      return `${window.location.origin}/api/langgraph`;
+      return `${window.location.origin}${basePath}/api/langgraph`;
     }
     // Fallback for SSR
-    return "http://localhost:2026/api/langgraph";
+    return `http://localhost:2026${basePath}/api/langgraph`;
   }
 }

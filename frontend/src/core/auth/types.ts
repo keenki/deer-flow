@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { env } from "@/env";
+
 // ── User schema (single source of truth) ──────────────────────────
 
 export const userSchema = z.object({
@@ -26,7 +28,8 @@ export function assertNever(x: never): never {
 }
 
 export function buildLoginUrl(returnPath: string): string {
-  return `/login?next=${encodeURIComponent(returnPath)}`;
+  const basePath = env.NEXT_PUBLIC_BASE_PATH ?? "";
+  return `${basePath}/login?next=${encodeURIComponent(returnPath)}`;
 }
 
 // ── Backend error response parsing ────────────────────────────────

@@ -14,8 +14,11 @@ import nextra from "nextra";
 
 const withNextra = nextra({});
 
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
+
 /** @type {import("next").NextConfig} */
 const config = {
+  basePath: basePath || undefined,
   i18n: {
     locales: ["en", "zh"],
     defaultLocale: "en",
